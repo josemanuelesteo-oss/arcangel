@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: elderguard-alerts
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: ELDERGUARD_API_KEY
+        generateValue: true
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FROM_EMAIL
+        sync: false
