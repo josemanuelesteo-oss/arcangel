@@ -359,25 +359,21 @@ async function sendFcmMessage(accessToken, deviceToken, alert) {
     ? `Ubicacion: https://maps.google.com/?q=${alert.location.lat},${alert.location.lon}`
     : "Ubicacion no disponible";
   const body = `${alert.protectedPerson.name}: ${alert.reason}. ${locationText}`;
+  const hasLocation = Boolean(alert.location && alert.location.lat && alert.location.lon);
   const payload = {
     message: {
       token: deviceToken,
-      notification: {
-        title: `Alerta ARCANGEL: ${alert.protectedPerson.name}`,
-        body
-      },
       data: {
         title: `Alerta ARCANGEL: ${alert.protectedPerson.name}`,
         body,
         reason: alert.reason,
         protectedPerson: alert.protectedPerson.name,
-        alertId: alert.id
+        alertId: String(alert.id),
+        lat: hasLocation ? String(alert.location.lat) : "",
+        lon: hasLocation ? String(alert.location.lon) : ""
       },
       android: {
-        priority: "HIGH",
-        notification: {
-          channel_id: "elderguard_alerts"
-        }
+        priority: "HIGH"
       }
     }
   };
