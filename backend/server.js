@@ -48,6 +48,36 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, deviceId: device.deviceId });
     }
 
+    if (req.method === "POST" && req.url === "/pairing/request") {
+      if (req.headers["x-elderguard-key"] !== API_KEY) {
+        return json(res, 401, { ok: false, error: "invalid_api_key" });
+      }
+      const body = await readJson(req);
+      const result = await requestPairing(body);
+      return json(res, 200, { ok: true, result });
+    }
+
+    if (req.method === "POST" && req.url === "/pairing/accept") {
+      if (req.headers["x-elderguard-key"] !== API_KEY) {
+        return json(res, 401, { ok: false, error: "invalid_api_key" });
+      }
+      const body = await readJson(req);
+      const result = await acceptPairing(body);
+      return json(res, 200, { ok: true, result });
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/seniors")) {
+      if (req.headers["x-elderguard-key"] !== API_KEY) {
+        return json(res, 401, { ok: false, error: "invalid_api_key" });
+      }
+      const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const senior = findSeniorByCode(requestUrl.searchParams.get("code"));
+      if (!senior) {
+        return json(res, 404, { ok: false, error: "senior_not_found" });
+      }
+      return json(res, 200, { ok: true, senior });
+    }
+
     return json(res, 404, { ok: false, error: "not_found" });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "internal_error" });
@@ -89,7 +119,10 @@ function normalizeDevice(body) {
     role: String(body.role || "caregiver").trim().slice(0, 40),
     enabled: body.enabled !== false,
     familyCode: normalizeFamilyCode(body.familyCode),
+    familyCodes: normalizeFamilyCodes(body.familyCodes, body.familyCode),
     protectedPersonName: String(body.protectedPersonName || "").trim().slice(0, 120),
+    protectedPersonPhone: String(body.protectedPersonPhone || "").trim().slice(0, 60),
+    caregiverName: String(body.caregiverName || "").trim().slice(0, 120),
     updatedAt: new Date().toISOString()
   };
 }
@@ -114,6 +147,92 @@ function readDevices() {
 
 function normalizeFamilyCode(value) {
   return String(value || "").trim().replace(/\s+/g, "").toUpperCase().slice(0, 80);
+}
+
+function normalizeFamilyCodes(values, fallback) {
+  const source = Array.isArray(values) ? values : [];
+  const codes = source.map(normalizeFamilyCode).filter(Boolean);
+  const fallbackCode = normalizeFamilyCode(fallback);
+  if (fallbackCode && !codes.includes(fallbackCode)) {
+    codes.push(fallbackCode);
+  }
+  return codes;
+}
+
+function findSeniorByCode(code) {
+  const normalized = normalizeFamilyCode(code);
+  if (!normalized) {
+    return null;
+  }
+  const senior = readDevices()
+    .filter((device) => device.role === "senior")
+    .filter((device) => device.familyCode === normalized || (Array.isArray(device.familyCodes) && device.familyCodes.includes(normalized)))
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+  if (!senior) {
+    return null;
+  }
+  return {
+    code: normalized,
+    name: senior.protectedPersonName || "Persona mayor",
+    phone: senior.protectedPersonPhone || ""
+  };
+}
+
+async function requestPairing(body) {
+  const seniorCode = normalizeFamilyCode(body.seniorCode);
+  const caregiverDeviceId = String(body.caregiverDeviceId || "").trim();
+  const caregiverName = String(body.caregiverName || "").trim().slice(0, 120);
+  if (!seniorCode || !caregiverDeviceId || !caregiverName) {
+    throw new Error("missing_pairing_fields");
+  }
+  const seniorDevice = readDevices()
+    .filter((device) => device.role === "senior")
+    .filter((device) => device.familyCode === seniorCode)
+    .filter((device) => Boolean(device.token))
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+  if (!seniorDevice) {
+    throw new Error("senior_not_registered");
+  }
+  const token = await firebaseAccessToken();
+  await sendFcmDataMessage(token, seniorDevice.token, {
+    type: "pairing_request",
+    caregiverName,
+    caregiverDeviceId,
+    seniorCode,
+    title: "Solicitud de cuidador",
+    body: `${caregiverName} quiere añadirte a su lista de personas mayores. ¿Aceptas?`
+  });
+  return { sent: true };
+}
+
+async function acceptPairing(body) {
+  const seniorCode = normalizeFamilyCode(body.seniorCode);
+  const caregiverDeviceId = String(body.caregiverDeviceId || "").trim();
+  const caregiverName = String(body.caregiverName || "").trim().slice(0, 120);
+  const seniorName = String(body.seniorName || "Persona mayor").trim().slice(0, 120);
+  const seniorPhone = String(body.seniorPhone || "").trim().slice(0, 60);
+  const devices = readDevices();
+  const caregiver = devices.find((device) => device.deviceId === caregiverDeviceId && device.role === "caregiver");
+  if (!caregiver) {
+    throw new Error("caregiver_not_registered");
+  }
+  caregiver.familyCodes = normalizeFamilyCodes(caregiver.familyCodes, caregiver.familyCode);
+  if (!caregiver.familyCodes.includes(seniorCode)) {
+    caregiver.familyCodes.push(seniorCode);
+  }
+  caregiver.updatedAt = new Date().toISOString();
+  fs.writeFileSync(DEVICES_PATH, JSON.stringify(devices, null, 2), "utf8");
+  const token = await firebaseAccessToken();
+  await sendFcmDataMessage(token, caregiver.token, {
+    type: "pairing_accepted",
+    seniorCode,
+    seniorName,
+    seniorPhone,
+    caregiverName,
+    title: "Solicitud aceptada",
+    body: `${seniorName} ya aparece en tu lista de Mayores.`
+  });
+  return { accepted: true };
 }
 
 async function sendEmail(alert) {
@@ -154,7 +273,9 @@ async function sendPushNotifications(alert) {
   const devices = readDevices()
     .filter((device) => device.enabled !== false)
     .filter((device) => device.role === "caregiver")
-    .filter((device) => device.familyCode && device.familyCode === alert.familyCode)
+    .filter((device) => Array.isArray(device.familyCodes)
+      ? device.familyCodes.includes(alert.familyCode)
+      : device.familyCode && device.familyCode === alert.familyCode)
     .filter((device) => Boolean(device.token));
 
   if (devices.length === 0) {
@@ -257,6 +378,25 @@ async function sendFcmMessage(accessToken, deviceToken, alert) {
         notification: {
           channel_id: "elderguard_alerts"
         }
+      }
+    }
+  };
+  return postJson(`https://fcm.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/messages:send`, payload, {
+    Authorization: `Bearer ${accessToken}`
+  });
+}
+
+function sendFcmDataMessage(accessToken, deviceToken, data) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(data)) {
+    normalized[key] = value == null ? "" : String(value);
+  }
+  const payload = {
+    message: {
+      token: deviceToken,
+      data: normalized,
+      android: {
+        priority: "HIGH"
       }
     }
   };
