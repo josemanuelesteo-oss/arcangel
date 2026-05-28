@@ -32,8 +32,17 @@ const server = http.createServer(async (req, res) => {
       const alert = normalizeAlert(body);
       appendLog(alert);
 
-      const result = { ok: true, skipped: "email_disabled" };
-      const push = await sendPushNotifications(alert);
+      let result = { ok: true, skipped: "email_disabled" };
+      if (alert.recipients.length > 0) {
+        try {
+          result = { ok: true, response: await sendEmail(alert) };
+        } catch (error) {
+          result = { ok: false, error: error.message || "email_error" };
+        }
+      }
+      const push = alert.emailAlertsEnabled
+        ? { ok: true, sent: 0, skipped: "email_alerts_enabled" }
+        : await sendPushNotifications(alert);
       return json(res, 200, { ok: true, provider: result, push });
     }
 
@@ -90,9 +99,12 @@ server.listen(PORT, () => {
 
 function normalizeAlert(body) {
   const contacts = Array.isArray(body.contacts) ? body.contacts : [];
+  const emailRecipients = body.emailAlertsEnabled === true && Array.isArray(body.emailRecipients)
+    ? body.emailRecipients
+    : [];
   const protectedPerson = normalizeProtectedPerson(body.protectedPerson);
-  const recipients = contacts
-    .map((contact) => String(contact.email || "").trim())
+  const recipients = emailRecipients
+    .map((email) => String(email || "").trim())
     .filter((email) => email.includes("@"));
 
   return {
@@ -101,6 +113,7 @@ function normalizeAlert(body) {
     reason: String(body.reason || "alerta").slice(0, 120),
     message: String(body.message || "Alerta ARCANGEL").slice(0, 3000),
     familyCode: normalizeFamilyCode(body.familyCode),
+    emailAlertsEnabled: body.emailAlertsEnabled === true,
     protectedPerson,
     location: body.location || null,
     contacts,
